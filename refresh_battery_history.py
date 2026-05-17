@@ -5,51 +5,44 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
-import subprocess
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 
-
-CHARGE_PATTERN = re.compile(
-    r"^(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) (?P<offset>[+-]\d{4}) "
-    r".*?(?:Charge:\s?)(?P<pct>\d+)%?\)?",
-    re.MULTILINE,
-)
+POWERLOG_DB = Path("/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL")
 
 
-def read_pmset_log() -> str:
-    return subprocess.run(
-        ["pmset", "-g", "log"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+def read_powerlog_rows(start: datetime, end: datetime) -> list[tuple[datetime, int, bool]]:
+    with sqlite3.connect(POWERLOG_DB) as connection:
+        rows = connection.execute(
+            """
+            SELECT timestamp, Level, IsCharging
+            FROM PLBatteryAgent_EventBackward_BatteryUI
+            WHERE timestamp BETWEEN ? AND ?
+            ORDER BY timestamp
+            """,
+            (start.timestamp(), end.timestamp()),
+        ).fetchall()
+    return [
+        (datetime.fromtimestamp(timestamp), int(level), bool(is_charging))
+        for timestamp, level, is_charging in rows
+    ]
 
 
-def read_live_battery() -> dict[str, object] | None:
-    result = subprocess.run(
-        ["pmset", "-g", "batt"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    match = re.search(r"(\d+)%;\s*([^;]+);", result)
-    if not match:
+def read_latest_battery_row() -> tuple[datetime, int, bool] | None:
+    with sqlite3.connect(POWERLOG_DB) as connection:
+        row = connection.execute(
+            """
+            SELECT timestamp, Level, IsCharging
+            FROM PLBatteryAgent_EventBackward_BatteryUI
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if row is None:
         return None
-    return {
-        "percentage": int(match.group(1)),
-        "status": match.group(2).strip(),
-    }
-
-
-def extract_rows(text: str, start: datetime, end: datetime) -> list[tuple[datetime, int]]:
-    rows: list[tuple[datetime, int]] = []
-    for match in CHARGE_PATTERN.finditer(text):
-        stamp = datetime.strptime(match.group("stamp"), "%Y-%m-%d %H:%M:%S")
-        if start <= stamp <= end:
-            rows.append((stamp, int(match.group("pct"))))
-    return rows
+    timestamp, level, is_charging = row
+    return datetime.fromtimestamp(timestamp), int(level), bool(is_charging)
 
 
 def round_down(value: datetime, minutes: int) -> datetime:
@@ -62,7 +55,7 @@ def round_down(value: datetime, minutes: int) -> datetime:
 
 
 def build_samples(
-    rows: list[tuple[datetime, int]],
+    rows: list[tuple[datetime, int, bool]],
     start: datetime,
     end: datetime,
     interval_minutes: int,
@@ -70,30 +63,31 @@ def build_samples(
     samples: list[dict[str, object]] = []
     cursor = round_down(start + timedelta(minutes=interval_minutes), interval_minutes)
     idx = 0
-    last: tuple[datetime, int] | None = None
+    last: tuple[datetime, int, bool] | None = None
 
     while cursor <= end:
         while idx < len(rows) and rows[idx][0] <= cursor:
             last = rows[idx]
             idx += 1
         if last:
-            observed_at, percentage = last
+            observed_at, percentage, is_charging = last
             samples.append(
                 {
                     "time": cursor.isoformat(timespec="minutes"),
                     "percentage": percentage,
                     "observedAt": observed_at.isoformat(timespec="seconds"),
                     "minutesSinceObservation": int((cursor - observed_at).total_seconds() // 60),
+                    "isCharging": is_charging,
                 }
             )
         cursor += timedelta(minutes=interval_minutes)
     return samples
 
 
-def build_change_points(rows: list[tuple[datetime, int]]) -> list[dict[str, object]]:
+def build_change_points(rows: list[tuple[datetime, int, bool]]) -> list[dict[str, object]]:
     points: list[dict[str, object]] = []
     previous: int | None = None
-    for stamp, percentage in rows:
+    for stamp, percentage, _ in rows:
         if percentage != previous:
             points.append(
                 {
@@ -105,13 +99,14 @@ def build_change_points(rows: list[tuple[datetime, int]]) -> list[dict[str, obje
     return points
 
 
-def build_events(rows: list[tuple[datetime, int]]) -> list[dict[str, object]]:
+def build_events(rows: list[tuple[datetime, int, bool]]) -> list[dict[str, object]]:
     return [
         {
             "time": stamp.isoformat(timespec="seconds"),
             "percentage": percentage,
+            "isCharging": is_charging,
         }
-        for stamp, percentage in rows
+        for stamp, percentage, is_charging in rows
     ]
 
 
@@ -187,9 +182,17 @@ def main() -> None:
 
     end = datetime.now().replace(microsecond=0)
     start = end - timedelta(hours=args.hours)
-    log_text = read_pmset_log()
-    rows = extract_rows(log_text, start, end)
-    live = read_live_battery()
+    rows = read_powerlog_rows(start, end)
+    latest = read_latest_battery_row()
+    live = (
+        {
+            "percentage": latest[1],
+            "status": "charging" if latest[2] else "discharging",
+            "observedAt": latest[0].isoformat(timespec="seconds"),
+        }
+        if latest is not None
+        else None
+    )
 
     samples = build_samples(rows, start, end, args.interval)
     payload = {
