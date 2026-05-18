@@ -110,6 +110,33 @@ def build_events(rows: list[tuple[datetime, int, bool]]) -> list[dict[str, objec
     ]
 
 
+def build_charging_intervals(rows: list[tuple[datetime, int, bool]]) -> list[dict[str, str]]:
+    intervals: list[dict[str, str]] = []
+    start: datetime | None = None
+
+    for stamp, _, is_charging in rows:
+        if is_charging and start is None:
+            start = stamp
+        elif not is_charging and start is not None:
+            intervals.append(
+                {
+                    "start": start.isoformat(timespec="seconds"),
+                    "end": stamp.isoformat(timespec="seconds"),
+                }
+            )
+            start = None
+
+    if start is not None and rows:
+        intervals.append(
+            {
+                "start": start.isoformat(timespec="seconds"),
+                "end": rows[-1][0].isoformat(timespec="seconds"),
+            }
+        )
+
+    return intervals
+
+
 def build_power_usage_buckets(
     samples: list[dict[str, object]],
     live: dict[str, object] | None,
@@ -205,6 +232,7 @@ def main() -> None:
         "events": build_events(rows),
         "samples": samples,
         "changePoints": build_change_points(rows),
+        "chargingIntervals": build_charging_intervals(rows),
         "powerUsageBuckets": build_power_usage_buckets(samples, live, end),
     }
 

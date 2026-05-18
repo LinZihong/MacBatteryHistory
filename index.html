@@ -16,6 +16,7 @@
         --low: #d0a326;
         --usage: #3d7ff0;
         --charge: #67c46a;
+        --charging-band: rgba(103, 196, 106, 0.14);
         --warn: #9a4b12;
       }
 
@@ -377,6 +378,27 @@
         ((width - pad.left - pad.right) / Math.max(samples.length, 1)) * 0.82,
         5
       );
+      const startTime = new Date(data.windowStart).getTime();
+      const endTime = new Date(data.windowEnd).getTime();
+      const xForTime = (value) =>
+        pad.left +
+        ((value - startTime) / Math.max(endTime - startTime, 1)) *
+          (width - pad.left - pad.right);
+      const chargingBands = (data.chargingIntervals || [])
+        .map((interval) => {
+          const left = xForTime(new Date(interval.start).getTime());
+          const right = xForTime(new Date(interval.end).getTime());
+          return `
+            <rect
+              x="${left}"
+              y="${pad.top}"
+              width="${Math.max(right - left, 0)}"
+              height="${height - pad.top - pad.bottom}"
+              fill="var(--charging-band)"
+            ></rect>
+          `;
+        })
+        .join("");
       const bars = samples
         .map((sample, index) => {
           const left = x(index) - barWidth / 2;
@@ -399,6 +421,7 @@
       svg.innerHTML = `
         ${ticks.join("")}
         ${timeMarks}
+        ${chargingBands}
         ${bars}
       `;
 
