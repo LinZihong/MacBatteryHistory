@@ -1,6 +1,6 @@
 # BatteryHistory
 
-!(demo.png)
+![Demo](demo.png)
 
 Local macOS battery-history dashboard backed by the private powerlog SQLite database.
 
